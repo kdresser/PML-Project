@@ -1,0 +1,426 @@
+---
+title: "ML of weight-lifting excercise form"
+output: html_document
+---
+
+### 0. Introduction
+
+Weight-lifting exercise movements can be done with correct form, or with less effective variations. The goal of this project 
+is to identify the correct, and several incorrect, exercise movements from body movement measurements.
+
+The original research project that supplied the data: http://groupware.les.inf.puc-rio.br/har
+The training data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The test data: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The entire R script for this analysis is "P-2.R" in this project's repo; all of the important code is quoted here.
+
+### 1. Raw data.
+
+The first step in model building was to examine the data to determine formatting. The presence of character data in 
+numeric fields led to treating those fields as a character type.
+
+### 2. Produce data ready for machine learning.
+
+The data were then re-read to further explore the formats and contents of the feature fields (159 in all). Some of the 
+numeric fields contained nulls and "#DIV/0!" strings.  These were converted to NAs. All character and integer fields were converted 
+to numeric. The "classe" field was converted to a factor. The counts of NAs by field were determined. Fields fell into two 
+groups: 0% NAs or 98% NAs. There were only 59 fields with 0 NAs, and these would become the features using in model building.
+
+New test and evaluation dataset field subsets were created 
+consisting of the class field and the movement data fields.
+
+```
+# Reread training and testing (evaluation) datasets as T0, E0. 
+T0 <- read.table("pml-training.csv", header=TRUE, sep=",", quote="\"", as.is=TRUE)
+T0$classe <- as.factor(T0$classe)   # Restore "classe" to be a factor.
+E0 <- read.table("pml-testing.csv", header=TRUE, sep=",", quote="\"", as.is=TRUE)
+
+# Survey field types.
+sFTs <- function(X) {
+  Xnames <- names(X)
+  nC <- 0;  nI <- 0;  nN <- 0;  nU <- 0;
+  suppressWarnings(sink())
+  sink("sFTs.txt", type="output", split=TRUE)
+  print(" ", quote=FALSE)
+  for (i in 1:160) {
+    if        (class(X[1, i]) == "character") {
+      vFTs[i] <<- "C"
+      print(sprintf("%3d : %s : %s", i, vFTs[i], Xnames[i]), quote=FALSE)
+      nC <- nC + 1
+    } else if (class(X[1, i]) == "integer"  ) {
+      vFTs[i] <<- "I"
+      print(sprintf("%3d : %s : %s", i, vFTs[i], Xnames[i]), quote=FALSE)    
+      nI <- nI + 1
+    } else if (class(X[1, i]) == "numeric"  ) {
+      vFTs[i] <<- "N"
+      print(sprintf("%3d : %s : %s", i, vFTs[i], Xnames[i]), quote=FALSE)    
+      nN <- nN + 1
+    } else {
+      vFTs[i] <<- "U"
+      print(sprintf("%3d : %s : %s", i, vFTs[i], Xnames[i]), quote=FALSE)    
+      nU <- nU + 1
+    }
+  }
+  print(" ", quote=FALSE)
+  print(sprintf("C: %2d", nC), quote=FALSE)
+  print(sprintf("I: %2d", nI), quote=FALSE)
+  print(sprintf("N: %2d", nN), quote=FALSE)
+  print(sprintf("?: %2d", nU), quote=FALSE)
+  print(" ", quote=FALSE)
+  sink()
+}
+
+# A vector of field types by field.
+vFTs <- vector(mode="character", 160)
+# Survey field types.
+sFTs(T0)
+
+# Indices of "C" features.
+Cs <- which(vFTs == "C")
+
+# Indices of "I" features.
+Is <- which(vFTs == "I")
+
+Cs_names <- names(data.frame(T0[c(Cs)]))
+Is_names <- names(data.frame(T0[c(Is)]))
+
+# Survey Character Fields.
+sCFs <- function(X, DIV0NUL=FALSE) {
+  Xnames <- names(X)
+  suppressWarnings(sink())
+  sink("sCFs.txt", type="output", split=TRUE)
+  # Look at only candidate feature fields.
+  for (i in 8:159) {
+    if (vFTs[i] == "C") {
+      print(" ", quote=FALSE)
+      print(sprintf("%3d : %s : %s", i, vFTs[i], Xnames[i]), quote=FALSE)
+      nFNA <- 0;  nNUL <- 0;  nNUM <- 0;  nOTH <- 0;
+      for (j in 1:nrow(X))   {
+        f <- X[j, i]
+        # DIV0 to ""?
+        if (DIV0NUL & (f == "#DIV/0!")) {
+          f <- ""
+          X[j, i] <- f
+          print("DIV0 -> NUL", quote=FALSE)
+        }
+        #
+        if        (is.null(f)) {
+          nNUL <- nNUL + 1    
+        } else if (is.na(f)) {
+          nFNA <- nFNA + 1
+        } else if (f == "") {
+          nNUL <- nNUL + 1    
+        } else {
+          n <- suppressWarnings(as.numeric(f))
+          if (is.na(n)) {
+            nOTH <- nOTH + 1
+            print(sprintf("  %5d : %s", j, f), quote=FALSE)
+          } else {
+            nNUM <- nNUM + 1
+          }
+        }
+      }
+      print(sprintf("  FNA: %5d,  NUL: %5d,  NUM: %5d,  OTH: %5d", 
+                    nFNA, nNUL, nNUM, nOTH), quote=FALSE)
+    }
+  }
+  sink()
+  if (DIV0NUL) {
+    return(X)
+  }
+}  
+
+# Survey the "#DIV0!" field values.  Convert DIV0's to "".
+T1 <- sCFs(T0, DIV0NUL=TRUE)
+sCFs(T1, DIV0NUL=FALSE)
+
+# Convert C, I fields to numeric.
+cvt2N <- function(X) {
+  for (i in 8:159) {
+    if (class(X[1, i]) != "numeric") {
+      X[, i] <- suppressWarnings(as.numeric(X[, i]))
+      if (class(X[1, i]) == "numeric") {
+        vFTs[i] <<- "N"
+      }
+    }
+  }
+  return(X)
+}  
+
+# T: Convert C, I to numeric.
+T2 <- cvt2N(T1)
+
+# E: Convert C, I to numeric.
+E2 <- cvt2N(E0)
+
+# Survey NAs.
+sNAs <- function(X) {
+  Xnames <- names(X)
+  suppressWarnings(sink())
+  sink("sNAs.txt", type="output", split=TRUE)
+  print(" ", quote=FALSE)
+  for (i in 1:160) {
+    n <- sum(is.na(X[, i]))
+    vnNA[i] <<- n
+    print(sprintf("%3d : %5d (%3.0f%%) : %s", i, vnNA[i], 100*vnNA[i]/nrow(X), Xnames[i]), quote=FALSE)
+  }
+  sink()
+}
+
+# A vector of NA counts by field.
+vnNA <- vector(mode="integer", 160)
+# Survey NAs.
+sNAs(T2)
+
+# Fields either have no NAs, or are nearly all (98%) NAs.
+# Which fields have zero NAs? (These will be ones used for ML.)
+znNA <- which(vnNA == 0)
+
+# Summarise features.
+sFs <- function(X) {
+  Xnames <- names(X)
+  suppressWarnings(sink())
+  sink("sFs.txt", type="output", split=TRUE)
+  for (i in 1:160) {
+    if (class(X[1, i]) == "numeric") {
+      print(" ", quote=FALSE)
+      print(sprintf("%3d : %s...", i, Xnames[i]), quote=FALSE)
+      print(summary(X[, i]), quote=FALSE)
+    }
+  }
+  sink()
+}
+
+# Summarise features, watching for weirdness.
+sFs(T2)
+
+# Create a dataframe containing the class and only the 
+# instantaneous measurement data.
+fsDF <- function(X) {
+  z <- which(vnNA == 0)
+  z <- z[z >= 8 & z != 160]
+  return(data.frame(X[, c(160, z)]))
+}
+
+# T: Subset training data fields.
+T3 <- fsDF(T2)
+
+# E: Subset evaluation data fields.
+E3 <- fsDF(E2)
+
+# Create the model building "training" and "testing" feature sets, using a 75/25 split.
+library(caret)
+set.seed(1234)
+z <- createDataPartition(y=T3$classe, p=0.75, list=FALSE)
+training <- T3[z, ]
+testing <- T3[-z, ]
+dim(training)
+dim(testing)
+```
+
+### 3. Principal components analysis
+
+The 59 features free of NAs were analysed for principal components.  PC1 through PC9 explained 95% of data variance and it was 
+decided to try that number of components in the model.
+
+```
+# What does PCA think of the features?
+pc <- prcomp(training[, -1])
+summary(pc)
+# PC1..PC9 explain 95% of variance.
+# PC1..PC18 explain 99% of variance.
+
+# Use caret to select the top 95% components (9, as indicated by "prcomp").
+prePC <- preProcess(training[, -1], method="pca", pcaComp=9)
+prePC
+trainPC <- predict(prePC, training[, -1])
+trainPC$classe <- training$classe
+testPC <- predict(prePC, testing[, -1])
+testPC$classe <- testing$classe
+save(trainPC, file="trainPC.RData")
+save(testPC, file="testPC.RData")
+```
+
+### 4. Fitting a random forest model
+
+A random forest model was chosen for two reasons: a suspicion that there would be significant interaction 
+between features (already shown by the PCA), and a degree of self-tuning and cross validation offered by the model learner. An RF was generated using default parameters; it produced and estimated 
+test accuracy of 0.933, with a confidence interval of 0.923 - 0.942. This model, when tested with the test data 
+held out from the training data, yielded an actual test accuracy of 0.953. That was decided to be good enough to predict the unknown classes of the 20-item evaluation set. 18 of the predictions were correct.
+
+```
+# Model #1, a random forest.
+# Use the error estimation and cross validation that's internal to the model generation.
+library(caret)
+set.seed(1234)
+mfrf0 <- train(classe~., method="rf", data=trainPC)
+
+###
+### -> 0.933 estimated test accuracy.  
+###    95% confidence interval: 0.923..0.942
+###
+
+# Check the RF against the testPC (held out from the original training data).
+cmrf0 <- confusionMatrix(testPC$classe, predict(mfrf0, testPC))
+cmrf0
+
+###
+### -> 0.953 actual test accuracy.
+###
+```
+
+### 5. Fitting a SVM model: determining hyperparameters
+
+As a learning exercise, a second model, a SVM, was built. This involved a 
+grid search for good hyperparameters. In order to reduce the search time, 
+timings were made to choose a smaller search training dataset. One quarter of 
+the training set was chosen. After searching (using a radial basis kernel), 
+values of 275 and 1.3 were found to be good cost and gamma parameters.
+
+```
+# Model #2.
+
+# Try a SVM, initially with default cost and gamma hyperparameters.
+library(e1071)
+set.seed(1234)
+mfsvm0 <- svm(classe~., data=trainPC)
+# Snoop a little...
+cmsvm0 <- confusionMatrix(testPC$classe, predict(mfsvm0, testPC))
+cmsvm0
+# -> 0.787 accuracy. 
+
+# Use a grid-search for better hyperparameters.
+# Do cross-validation within the trainPC dataset.
+library(caret)
+library(e1071)
+
+# Measure the SVM modeling time vs training dataset size, to 
+# determine how large a dataset to use during a hyperparameter
+# grid search.
+
+# trainPC / 1.
+set.seed(1234)
+T <- trainPC
+dim(T)
+ptm0 <- proc.time()
+set.seed(1234)
+mfsvm <- svm(classe~., data=T)
+proc.time() - ptm0
+# -> 62s
+
+# trainPC / 2.
+set.seed(1234)
+z <- createDataPartition(y=T$classe, p=0.5, list=FALSE)
+T <- T[z, ]
+dim(T)
+ptm0 <- proc.time()
+set.seed(1234)
+mfsvm <- svm(classe~., data=T)
+proc.time() - ptm0
+# -> 16s
+
+# trainPC / 4.
+set.seed(1234)
+z <- createDataPartition(y=T$classe, p=0.5, list=FALSE)
+T <- T[z, ]
+dim(T)
+ptm0 <- proc.time()
+set.seed(1234)
+mfsvm <- svm(classe~., data=T)
+proc.time() - ptm0
+# -> 4.9s
+
+# trainPC / 8.
+set.seed(1234)
+z <- createDataPartition(y=T$classe, p=0.5, list=FALSE)
+T <- T[z, ]
+dim(T)
+ptm0 <- proc.time()
+set.seed(1234)
+mfsvm <- svm(classe~., data=T)
+proc.time() - ptm0
+# -> 1.7s
+
+# Use a 1/4 training dataset for the grid search.
+# Create it 25% larger to accomodate 5-fold cross-validation by tune.svm.
+set.seed(1234)
+z <- createDataPartition(y=trainPC$classe, p=0.25*1.25, list=FALSE)
+trainPCgs <- trainPC[z[, 1], ]
+dim(trainPCgs)
+# -> 4,564 in trainPCgs grid search training + cross-validation dataset.
+
+# First, a coarse search of cost, holding gamma to the default used above.
+tune.res <- tune(svm, classe~., data=trainPCgs, 
+                 kernel="radial", 
+                 ranges=list(cost=2^seq(-5, 10, len=10), gamma=c(0.1111)),
+                 tunecontrol=tune.control(cross=5))
+tune.res
+# -> best cost 322.5
+
+# Second, a finer search of cost and a coarse search of gamma.
+tune.res <- tune(svm, classe~., data=trainPCgs, 
+                 kernel="radial", 
+                 ranges=list(cost=c(200, 300, 400), gamma=10^seq(-3, 3, len=5)),
+                 tunecontrol=tune.control(cross=5))
+tune.res
+# -> cost 300, gamma 1
+
+# Third, a final fine search.
+tune.res <- tune(svm, classe~., data=trainPCgs, 
+                 kernel="radial", 
+                 ranges=list(cost=c(275, 300, 325), gamma=c(0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3)),
+                 tunecontrol=tune.control(cross=5))
+tune.res
+# -> cost 275, gamma 1.3
+```
+
+### 6. Fitting a SVM model: training and estimated & actual test accuracy
+
+The master training dataset was split 80/20 into another training set and a validation set.  A final SVM model was trained using the hyperparameter determined earlier.  After learning on 11,776 samples, testing on the 2,942 validation samples yielded a 0.975 estimated test accuracy, with a CI of 0.968 - 0.980. The actual 
+accuracy rate on the master test data set (4,904 samples) turned out to be 0.970.
+
+```
+# SVM test accuracy estimate.
+# Use 4/5 of trainPC for training and the remainder for validation.
+# Will not redo the hyperparameter search.
+set.seed(1234)
+z <- createDataPartition(y=trainPC$classe, p=0.8, list=FALSE)
+names(trainPC)
+trainPC2 <- trainPC[z, ]
+validPC2 <- trainPC[-z, ]
+dim(trainPC2)
+dim(validPC2)
+set.seed(1234)
+mfsvm2 <- svm(classe~., data=trainPC2, cost=275, gamma=1.3)
+mfsvm2
+cmsvm2 <- confusionMatrix(validPC2$classe, predict(mfsvm2, validPC2))
+cmsvm2
+
+###
+### -> 0.975 estimated test accuracy
+### 95% confidence interval: 0.968..0.980
+###
+
+# SVM actual test accuracy.
+cmsvm <- confusionMatrix(testPC$classe, predict(mfsvm2, testPC))
+cmsvm
+
+###
+### -> 0.970 actual test accuracy
+###
+```
+
+### 7. Conclusions
+
+Two models, a random forest and a SVM, were able to predict with accuracies of 0.95 and 0.97 respectively, using only 
+point samples from continuous time series.
+
+### 8. Possible improvements
+
+1. No feature normalization was done. Whether it will improve either of the model should to be investigated.
+2. The choice of using 9 principal components worked well. The optimal value for this threshold should be determined.
+3. Use more thorough performance metrics (e.g., AUC).
+4. Examine the errors made with respect to the desired class (A).
+5. Consider correlating errors with particular spots within exercise movements (e.g., moments of low or high velocity).
+
+### .
